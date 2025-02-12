@@ -17,7 +17,7 @@ pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
 # set the pinecone index
 
-index_name = "langchain-sample-index"  # change if desired
+index_name = os.environ.get("PINECONE_INDEX_NAME") 
 index = pc.Index(index_name)
 
 # initialize embeddings model + vector store
@@ -39,9 +39,9 @@ results = vector_store.similarity_search(
 
 retriever = vector_store.as_retriever(
     search_type="similarity_score_threshold",
-    search_kwargs={"k": 1, "score_threshold": 0.5},
+    search_kwargs={"k": 5, "score_threshold": 0.5},
 )
-results = retriever.invoke("what did you have for breakfast?")
+results = retriever.invoke("what is retrieval augmented generation?")
 
 #'''
 

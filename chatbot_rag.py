@@ -12,7 +12,6 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-
 load_dotenv()
 
 st.title("Chatbot")
@@ -21,7 +20,7 @@ st.title("Chatbot")
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
 # initialize pinecone database
-index_name = "langchain-sample-index"  # change if desired
+index_name = os.environ.get("PINECONE_INDEX_NAME")  # change if desired
 index = pc.Index(index_name)
 
 # initialize embeddings model + vector store
