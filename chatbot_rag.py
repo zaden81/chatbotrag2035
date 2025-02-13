@@ -63,7 +63,7 @@ if prompt:
     # creating and invoking the retriever
     retriever = vector_store.as_retriever(
         search_type="similarity_score_threshold",
-        search_kwargs={"k": 1, "score_threshold": 0.5},
+        search_kwargs={"k": 3, "score_threshold": 0.5},
     )
 
     docs = retriever.invoke(prompt)
@@ -81,7 +81,7 @@ if prompt:
 
 
     #print("-- SYS PROMPT --")
-    #print(system_prompt_fmt)
+    print(system_prompt_fmt)
 
     # adding the system prompt to the message history
     st.session_state.messages.append(SystemMessage(system_prompt_fmt))
