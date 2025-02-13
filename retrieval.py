@@ -26,25 +26,13 @@ embeddings = OpenAIEmbeddings(model="text-embedding-3-large",api_key=os.environ.
 vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
 # retrieval
-'''
-results = vector_store.similarity_search(
-    "what did you have for breakfast?",
-    k=2,
-    filter={"source": "tweet"},
-)
-
-'''
-
 retriever = vector_store.as_retriever(
     search_type="similarity_score_threshold",
     search_kwargs={"k": 5, "score_threshold": 0.5},
 )
 results = retriever.invoke("what is retrieval augmented generation?")
 
-#'''
-
 # show results
-
 print("RESULTS:")
 
 for res in results:

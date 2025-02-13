@@ -80,7 +80,7 @@ if prompt:
     system_prompt_fmt = system_prompt.format(context=docs_text)
 
 
-    #print("-- SYS PROMPT --")
+    print("-- SYS PROMPT --")
     print(system_prompt_fmt)
 
     # adding the system prompt to the message history

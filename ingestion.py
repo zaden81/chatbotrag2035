@@ -48,8 +48,6 @@ loader = PyPDFDirectoryLoader("documents/")
 
 raw_documents = loader.load()
 
-print(raw_documents)
-
 # splitting the document
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=800,

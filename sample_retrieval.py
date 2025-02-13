@@ -26,7 +26,7 @@ embeddings = OpenAIEmbeddings(model="text-embedding-3-large",api_key=os.environ.
 vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
 # retrieval
-#'''
+'''
 
 ###### add docs to db ##############################
 results = vector_store.similarity_search_with_score(
@@ -44,14 +44,14 @@ for res in results:
 
 retriever = vector_store.as_retriever(
     search_type="similarity_score_threshold",
-    search_kwargs={"k": 5, "score_threshold": 0.5},
+    search_kwargs={"k": 5, "score_threshold": 0.6},
 )
-results = retriever.invoke("what is retrieval augmented generation?")
+results = retriever.invoke("what did you have for breakfast?")
 
 print("RESULTS:")
 
 for res in results:
     print(f"* {res.page_content} [{res.metadata}]")
 
-'''
+#'''
 
