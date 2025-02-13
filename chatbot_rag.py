@@ -76,7 +76,6 @@ if prompt:
     Use three sentences maximum and keep the answer concise.
     Context: {context}:"""
 
-
     # Populate the system prompt with the retrieved context
     system_prompt_fmt = system_prompt.format(context=docs_text)
 
