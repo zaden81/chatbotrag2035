@@ -61,8 +61,6 @@ text_splitter = RecursiveCharacterTextSplitter(
 # creating the chunks
 documents = text_splitter.split_documents(raw_documents)
 
-print(documents)
-
 # generate unique id's
 
 i = 0

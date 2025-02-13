@@ -17,7 +17,7 @@ pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
 # set the pinecone index
 
-index_name = os.environ.get("PINECONE_INDEX_NAME") 
+index_name = "sample-index"
 index = pc.Index(index_name)
 
 # initialize embeddings model + vector store
@@ -26,12 +26,19 @@ embeddings = OpenAIEmbeddings(model="text-embedding-3-large",api_key=os.environ.
 vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
 # retrieval
-'''
-results = vector_store.similarity_search(
+#'''
+
+###### add docs to db ##############################
+results = vector_store.similarity_search_with_score(
     "what did you have for breakfast?",
-    k=2,
+    #k=2,
     filter={"source": "tweet"},
 )
+
+print("RESULTS:")
+
+for res in results:
+    print(f"* {res[0].page_content} [{res[0].metadata}] -- {res[1]}")
 
 '''
 
@@ -41,11 +48,10 @@ retriever = vector_store.as_retriever(
 )
 results = retriever.invoke("what is retrieval augmented generation?")
 
-#'''
-
-# show results
-
 print("RESULTS:")
 
 for res in results:
     print(f"* {res.page_content} [{res.metadata}]")
+
+'''
+
