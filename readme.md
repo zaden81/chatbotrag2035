@@ -32,6 +32,16 @@ venv\Scripts\Activate
 pip install -r requirements.txt
 ```
 
+5. Create accounts
+
+- Create a free account on Pinecone: https://www.pinecone.io/
+- Create an API key for OpenAI: https://platform.openai.com/api-keys
+
+6. Add API keys to .env file
+
+- Rename .env.example to .env
+- Add the API keys for Pinecone and OpenAI to the .env file
+
 <h3>Executing the scripts</h3>
 
 1. Open a terminal in VS Code
@@ -39,6 +49,8 @@ pip install -r requirements.txt
 2. Execute the following command:
 
 ```
+python sample_ingestion.py
+python sample_retrieval.py
 python ingestion.py
 python retrieval.py
 streamlit run chatbot_rag.py
