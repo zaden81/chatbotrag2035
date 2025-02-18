@@ -5,6 +5,15 @@
   <li>Python 3.11+</li>
 </ul>
 
+<div>
+    &nbsp;<br>
+<a href="https://www.youtube.com/watch?v=A3WKdt_MNZQ">
+    <img src="https://github.com/ThomasJanssen-tech/LangChain-Pinecone-RAG/blob/main/thumbnail.png" alt="Thomas Janssen Youtube" width="200"/>
+</a>
+    &nbsp;<br>
+     &nbsp;<br>
+</div>
+
 <h2>Installation</h2>
 1. Clone the repository:
 
