@@ -1,9 +1,6 @@
 <h1>Retrieval Augmented Generation (RAG) with Streamlit, LangChain and Pinecone</h1>
 
-<h2>Prerequisites</h2>
-<ul>
-  <li>Python 3.11+</li>
-</ul>
+<h2>Watch the full tutorial on my YouTube Channel</h2>
 
 <div>
     &nbsp;<br>
@@ -13,6 +10,11 @@
     &nbsp;<br>
      &nbsp;<br>
 </div>
+
+<h2>Prerequisites</h2>
+<ul>
+  <li>Python 3.11+</li>
+</ul>
 
 <h2>Installation</h2>
 1. Clone the repository:
