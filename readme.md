@@ -1,7 +1,6 @@
 <h1>Retrieval Augmented Generation (RAG) with Streamlit, LangChain and Pinecone</h1>
 
 <h2>Watch the full tutorial on my YouTube Channel</h2>
-
 <div>
     &nbsp;<br>
 <a href="https://www.youtube.com/watch?v=A3WKdt_MNZQ">
