@@ -19,9 +19,9 @@ from langchain.retrievers.document_compressors import EmbeddingsFilter
 from langchain.retrievers.multi_query import MultiQueryRetriever
 
 # huggingface & wrappers
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoProcessor, AutoModelForSpeechSeq2Seq
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoProcessor, AutoModelForSpeechSeq2Seq, TextIteratorStreamer
 from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
-
+import threading
 # reranker (cross-encoder)
 from sentence_transformers import CrossEncoder
 
@@ -32,7 +32,7 @@ from streamlit_mic_recorder import mic_recorder
 import io
 import numpy as np
 import soundfile as sf
-
+from concurrent.futures import ThreadPoolExecutor
 import torch
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
@@ -45,6 +45,22 @@ os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
 st.title("Chatbot Tư vấn pháp luật")
 
+# Options
+with st.sidebar:
+    st.header("Tùy chọn")
+    fast_mode = st.toggle("⚡ Ưu tiên tốc độ", value=True, help="Tối ưu hoá độ trễ: tắt reranker/MultiQuery, giảm số token trả lời, ASR nhỏ hơn")
+
+# Style to place mic button inline with chat input at the bottom
+st.markdown(
+    """
+    <style>
+      .mic-fab{position:fixed;bottom:20px;right:110px;z-index:1000;}
+      .mic-fab > div{margin:0;}
+      @media (max-width: 640px){.mic-fab{right:90px;bottom:16px;}}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 # Pinecone
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 index_name = os.environ.get("PINECONE_INDEX_NAME")
@@ -83,8 +99,8 @@ def load_gemma():
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_new_tokens=128,
-        temperature=0.3,
+        max_new_tokens=96,
+        temperature=0.2,
         pad_token_id=tokenizer.eos_token_id,
     )
     llm = HuggingFacePipeline(pipeline=gen_pipe)
@@ -106,7 +122,7 @@ def load_reranker():
 
 # ==== PhoWhisper via transformers (pipeline ASR, không dùng ffmpeg) ====
 @st.cache_resource
-def load_asr_pipeline():
+def load_asr_pipeline(prefer_tiny: bool = False):
     """
     Tải PhoWhisper/Whisper theo thứ tự ưu tiên.
     Không dùng use_auth_token/local_files_only trong pipeline.
@@ -116,11 +132,17 @@ def load_asr_pipeline():
     device = 0 if torch.cuda.is_available() else -1
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-    repos = [
-        "vinai/PhoWhisper-small",  # ưu tiên PhoWhisper (TV)
-        "openai/whisper-small",    # fallback 1
-        "openai/whisper-tiny"      # fallback 2 (nhẹ để test mạng/token)
+    repos_fast = [
+        "openai/whisper-tiny",
+        "vinai/PhoWhisper-small",
+        "openai/whisper-small",
     ]
+    repos_quality = [
+        "vinai/PhoWhisper-small",
+        "openai/whisper-small",
+        "openai/whisper-tiny",
+    ]
+    repos = repos_fast if prefer_tiny else repos_quality
 
     last_err = None
     for repo in repos:
@@ -139,7 +161,7 @@ def load_asr_pipeline():
                 stride_length_s=(4, 2),
                 return_timestamps=False,
             )
-            if repo != "vinai/PhoWhisper-small":
+            if repo != "vinai/PhoWhisper-small" and not prefer_tiny:
                 st.info(f"Đang dùng fallback: {repo}")
             return asr
         except Exception as e:
@@ -148,11 +170,15 @@ def load_asr_pipeline():
 
     st.error(f"ASR chưa sẵn sàng. Kiểm tra HUGGINGFACE_HUB_TOKEN và kết nối mạng. Chi tiết: {last_err}")
     return None
-
-tokenizer, model, llm = load_gemma()
-reranker = load_reranker()
-asr_pipe = load_asr_pipeline()
-
+# Tải các tài nguyên nặng song song để giảm thời gian chờ
+with st.spinner("Đang tải mô hình và tài nguyên…"):
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_gemma = executor.submit(load_gemma)
+        future_reranker = executor.submit(load_reranker)
+        future_asr = executor.submit(load_asr_pipeline)
+        tokenizer, model, llm = future_gemma.result()
+        reranker = future_reranker.result()
+        asr_pipe = future_asr.result()
 # --- Tạo retriever 3 tầng ---
 # 1) Base: MMR để vừa liên quan vừa đa dạng
 mmr_retriever = vector_store.as_retriever(
@@ -164,9 +190,11 @@ mmr_retriever = vector_store.as_retriever(
 compressor = EmbeddingsFilter(embeddings=embeddings, similarity_threshold=0.62)
 compressed_retriever = ContextualCompressionRetriever(base_compressor=compressor, base_retriever=mmr_retriever)
 
-# 3) MultiQuery: sinh biến thể câu hỏi tăng recall
-mq_retriever = MultiQueryRetriever.from_llm(retriever=compressed_retriever, llm=llm)
-
+# 3) MultiQuery: chỉ bật khi không phải fast mode
+if fast_mode:
+    mq_retriever = compressed_retriever
+else:
+    mq_retriever = MultiQueryRetriever.from_llm(retriever=compressed_retriever, llm=llm)
 # --- Helper: Rerank + guardrail ---
 def truncate_for_rerank(text: str, max_chars: int = 2500) -> str:
     return text if len(text) <= max_chars else text[:max_chars]
@@ -174,21 +202,21 @@ def truncate_for_rerank(text: str, max_chars: int = 2500) -> str:
 def retrieve_docs(query: str, final_k: int = 6):
     candidates = mq_retriever.get_relevant_documents(query)
 
-    if not candidates:
+    if not candidates and not fast_mode:
         old = compressor.similarity_threshold
         compressor.similarity_threshold = 0.58
         candidates = mq_retriever.get_relevant_documents(query)
         compressor.similarity_threshold = old
 
     if not candidates:
-        simple = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 8})
+        simple = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 6 if fast_mode else 8})
         candidates = simple.get_relevant_documents(query)
 
     if not candidates:
         return []
 
     if reranker is None:
-        ranked_docs = candidates[:final_k]
+        ranked_docs = candidates[: (4 if fast_mode else final_k)]
     else:
         pairs = [(query, truncate_for_rerank(d.page_content)) for d in candidates]
         scores = reranker.predict(pairs)
@@ -236,7 +264,7 @@ with st.container():
       just_once=False,   # bấm để ghi, bấm lần nữa để dừng
       format="wav"       # giữ 'wav' để đọc bằng soundfile
   )
-
+  st.markdown('</div>', unsafe_allow_html=True)
 
 # Nếu vừa dừng ghi âm → nhận dạng (đọc WAV từ bytes, tự resample) → đổ prompt nếu ô chat trống
 voice_text = None
@@ -296,17 +324,31 @@ if prompt:
         inputs = tokenizer(final_prompt, return_tensors="pt", truncation=True)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        output = model.generate(
+        max_tokens = 300 if fast_mode else 600
+        do_sample = False if fast_mode else True
+
+        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+        generation_kwargs = dict(
             **inputs,
-            max_new_tokens=600,
-            do_sample=True,
-            temperature=0.7
+            max_new_tokens=max_tokens,
+            do_sample=do_sample,
+            temperature=0.7 if not fast_mode else 0.0,
+            streamer=streamer,
         )
-        decoded = tokenizer.decode(output[0], skip_special_tokens=True)
-        result = decoded.split("Answer:")[-1].strip()
+
+        thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
+        thread.start()
+
+        partial_text = ""
 
         with st.chat_message("assistant"):
-            st.markdown(result)
+            placeholder = st.empty()
+            for token_text in streamer:
+                partial_text += token_text
+                placeholder.markdown(partial_text)
+
+        thread.join()
+        result = partial_text.strip()
         st.session_state.messages.append(AIMessage(result))
 
         # Hiển thị nguồn
