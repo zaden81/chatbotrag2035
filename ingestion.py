@@ -25,6 +25,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 load_dotenv()
 
+
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 index_name = os.environ.get("PINECONE_INDEX_NAME")  # change if desired
 
