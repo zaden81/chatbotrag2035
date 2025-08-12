@@ -32,6 +32,7 @@ from streamlit_mic_recorder import mic_recorder
 import io
 import numpy as np
 import soundfile as sf
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -149,9 +150,15 @@ def load_asr_pipeline():
     st.error(f"ASR chưa sẵn sàng. Kiểm tra HUGGINGFACE_HUB_TOKEN và kết nối mạng. Chi tiết: {last_err}")
     return None
 
-tokenizer, model, llm = load_gemma()
-reranker = load_reranker()
-asr_pipe = load_asr_pipeline()
+# Tải các tài nguyên nặng song song để giảm thời gian chờ
+with st.spinner("Đang tải mô hình và tài nguyên…"):
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_gemma = executor.submit(load_gemma)
+        future_reranker = executor.submit(load_reranker)
+        future_asr = executor.submit(load_asr_pipeline)
+        tokenizer, model, llm = future_gemma.result()
+        reranker = future_reranker.result()
+        asr_pipe = future_asr.result()
 
 # --- Tạo retriever 3 tầng ---
 # 1) Base: MMR để vừa liên quan vừa đa dạng
