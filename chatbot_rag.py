@@ -45,6 +45,18 @@ os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
 st.title("Chatbot Tư vấn pháp luật")
 
+# Style to place mic button inline with chat input at the bottom
+st.markdown(
+    """
+    <style>
+      .mic-fab{position:fixed;bottom:20px;right:110px;z-index:1000;}
+      .mic-fab > div{margin:0;}
+      @media (max-width: 640px){.mic-fab{right:90px;bottom:16px;}}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Pinecone
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 index_name = os.environ.get("PINECONE_INDEX_NAME")
@@ -236,6 +248,7 @@ with st.container():
       just_once=False,   # bấm để ghi, bấm lần nữa để dừng
       format="wav"       # giữ 'wav' để đọc bằng soundfile
   )
+  st.markdown('</div>', unsafe_allow_html=True)
 
 
 # Nếu vừa dừng ghi âm → nhận dạng (đọc WAV từ bytes, tự resample) → đổ prompt nếu ô chat trống
