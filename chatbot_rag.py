@@ -1,6 +1,6 @@
 # --- imports ---
 import streamlit as st
-st.set_page_config(page_title="Chatbot Pháp luật")  # phải là lệnh Streamlit đầu tiên
+st.set_page_config(page_title="Chatbot Pháp luật")
 
 import os
 from dotenv import load_dotenv
@@ -18,24 +18,30 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import EmbeddingsFilter
 from langchain.retrievers.multi_query import MultiQueryRetriever
 
-# huggingface & wrappers
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoProcessor, AutoModelForSpeechSeq2Seq, TextIteratorStreamer
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
-import threading
-# reranker (cross-encoder)
+# ONLY for ASR (giữ lại)
+from transformers import pipeline, AutoProcessor, AutoModelForSpeechSeq2Seq
+
+# embeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+
+# reranker
 from sentence_transformers import CrossEncoder
 
-# mic
+# mic + LM Studio
 from streamlit_mic_recorder import mic_recorder
+from openai import OpenAI
+from langchain_openai import ChatOpenAI
 
-# audio utils (để đọc WAV từ bytes, không cần ffmpeg)
+# audio utils
 import io
 import numpy as np
 import soundfile as sf
 from concurrent.futures import ThreadPoolExecutor
 import torch
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 # --- init ---
 load_dotenv()
@@ -65,9 +71,9 @@ st.markdown(
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 index_name = os.environ.get("PINECONE_INDEX_NAME")
 index_host = os.environ.get("PINECONE_INDEX_HOST")
-index = pc.Index(index_name, host=index_host)  # nếu cần host: pc.Index(index_name, host=index_host)
+index = pc.Index(index_name, host=index_host) 
 
-# Embeddings (All-MiniLM-L6-v2 là ổn cho tốc/chi phí)
+# Embeddings 
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
@@ -81,130 +87,114 @@ for message in st.session_state.messages:
     with st.chat_message(role):
         st.markdown(message.content)
 
-# --- LLM & reranker caches ---
 @st.cache_resource
-def load_gemma():
-    model_id = "google/gemma-3-1b-it"
-    hf_token = os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+def load_lmstudio():
+    client = OpenAI(
+        base_url=os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
+        api_key=os.getenv("LMSTUDIO_API_KEY", "lm-studio"),
+    )
+    model_id = os.getenv("LMSTUDIO_MODEL", "gemma-3-1b-it")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, local_files_only=False)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        token=hf_token,
-        device_map="cuda" if torch.cuda.is_available() else "cpu",
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-    )
-    # Tạo pipeline để dùng cho MultiQueryRetriever (ít random để ổn định câu hỏi phụ)
-    gen_pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_new_tokens=96,
+    llm_mq = ChatOpenAI(
+        base_url=os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
+        api_key=os.getenv("LMSTUDIO_API_KEY", "lm-studio"),
+        model=model_id,
         temperature=0.2,
-        pad_token_id=tokenizer.eos_token_id,
+        max_tokens=96,
     )
-    llm = HuggingFacePipeline(pipeline=gen_pipe)
-    return tokenizer, model, llm
+    return client, model_id, llm_mq
+
 
 @st.cache_resource
 def load_reranker():
-    """Ưu tiên model nhanh; nếu lỗi, fallback sang đa ngôn ngữ; nếu vẫn lỗi → None."""
-    hf_token = os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    local_dir = r"D:\khoaluan\LangChain-Pinecone-RAG\documents\msmarco-minilm-l6-v2"  # Đường dẫn model đã tải
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     try:
-        return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", token=hf_token, max_length=512)
-    except Exception as e1:
-        st.warning(f"Không tải được ms-marco-MiniLM-L-6-v2. Thử reranker đa ngôn ngữ…\n{e1}")
-        try:
-            return CrossEncoder("jinaai/jina-reranker-v2-base-multilingual", token=hf_token, max_length=512, trust_remote_code=True)
-        except Exception as e2:
-            st.error(f"Không tải được reranker (đã thử 2 model). Chạy không rerank.\n{e2}")
-            return None
+        return CrossEncoder(local_dir, max_length=512, device=device)
+    except Exception as e:
+        st.error(f"Không load được model local: {e}")
+        return None
+
 
 # ==== PhoWhisper via transformers (pipeline ASR, không dùng ffmpeg) ====
 @st.cache_resource
-def load_asr_pipeline(prefer_tiny: bool = False):
+def load_asr_pipeline():
     """
-    Tải PhoWhisper/Whisper theo thứ tự ưu tiên.
-    Không dùng use_auth_token/local_files_only trong pipeline.
-    Đọc WAV từ bytes bằng soundfile → không cần ffmpeg.
+    Load PhoWhisper-small từ thư mục local (offline).
     """
-    hf_token = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HUGGINGFACEHUB_API_TOKEN")
+    import os
+    from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, pipeline
+    import torch
+
     device = 0 if torch.cuda.is_available() else -1
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-    repos_fast = [
-        "openai/whisper-tiny",
-        "vinai/PhoWhisper-small",
-        "openai/whisper-small",
-    ]
-    repos_quality = [
-        "vinai/PhoWhisper-small",
-        "openai/whisper-small",
-        "openai/whisper-tiny",
-    ]
-    repos = repos_fast if prefer_tiny else repos_quality
+    # === ĐƯỜNG DẪN LOCAL CỦA MODEL (đổi cho đúng) ===
+    LOCAL_MODEL_DIR = r"D:/khoaluan/LangChain-Pinecone-RAG/documents/phowhisper-small"
 
-    last_err = None
-    for repo in repos:
-        try:
-            processor = AutoProcessor.from_pretrained(repo, token=hf_token, local_files_only=False)
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                repo, token=hf_token, local_files_only=False, torch_dtype=dtype
-            )
-            asr = pipeline(
-                task="automatic-speech-recognition",
-                model=model,
-                tokenizer=getattr(processor, "tokenizer", processor),
-                feature_extractor=getattr(processor, "feature_extractor", processor),
-                device=device,
-                chunk_length_s=20,
-                stride_length_s=(4, 2),
-                return_timestamps=False,
-            )
-            if repo != "vinai/PhoWhisper-small" and not prefer_tiny:
-                st.info(f"Đang dùng fallback: {repo}")
-            return asr
-        except Exception as e:
-            st.warning(f"Không tải được {repo}: {e}")
-            last_err = e
+    try:
+        processor = AutoProcessor.from_pretrained(LOCAL_MODEL_DIR, local_files_only=True)
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            LOCAL_MODEL_DIR, local_files_only=True, torch_dtype=dtype
+        )
+        asr = pipeline(
+            task="automatic-speech-recognition",
+            model=model,
+            tokenizer=getattr(processor, "tokenizer", processor),
+            feature_extractor=getattr(processor, "feature_extractor", processor),
+            device=device,
+            chunk_length_s=20,
+            stride_length_s=(4, 2),
+            return_timestamps=False,
+        )
+        return asr
+    except Exception as e:
+        st.error(f"Không load được PhoWhisper-small từ local: {e}")
+        return None
 
-    st.error(f"ASR chưa sẵn sàng. Kiểm tra HUGGINGFACE_HUB_TOKEN và kết nối mạng. Chi tiết: {last_err}")
-    return None
-# Tải các tài nguyên nặng song song để giảm thời gian chờ
+# Tải tài nguyên song song
 with st.spinner("Đang tải mô hình và tài nguyên…"):
     with ThreadPoolExecutor(max_workers=3) as executor:
-        future_gemma = executor.submit(load_gemma)
+        future_lms = executor.submit(load_lmstudio)
         future_reranker = executor.submit(load_reranker)
         future_asr = executor.submit(load_asr_pipeline)
-        tokenizer, model, llm = future_gemma.result()
+
+        client, lm_model_id, llm = future_lms.result()
         reranker = future_reranker.result()
         asr_pipe = future_asr.result()
+
+
+
 # --- Tạo retriever 3 tầng ---
 # 1) Base: MMR để vừa liên quan vừa đa dạng
 mmr_retriever = vector_store.as_retriever(
     search_type="mmr",
-    search_kwargs={"k": 12, "fetch_k": 60, "lambda_mult": 0.6},
+    search_kwargs={"k": 20, "fetch_k": 60, "lambda_mult": 0.6},  
 )
 
 # 2) Nén/nội dung: lọc theo ngưỡng similarity để đuổi nhiễu
-compressor = EmbeddingsFilter(embeddings=embeddings, similarity_threshold=0.62)
+compressor = EmbeddingsFilter(embeddings=embeddings, similarity_threshold=0.50, top_k=10)
 compressed_retriever = ContextualCompressionRetriever(base_compressor=compressor, base_retriever=mmr_retriever)
+
 
 # 3) MultiQuery: chỉ bật khi không phải fast mode
 if fast_mode:
     mq_retriever = compressed_retriever
 else:
     mq_retriever = MultiQueryRetriever.from_llm(retriever=compressed_retriever, llm=llm)
+
+
 # --- Helper: Rerank + guardrail ---
 def truncate_for_rerank(text: str, max_chars: int = 2500) -> str:
     return text if len(text) <= max_chars else text[:max_chars]
 
-def retrieve_docs(query: str, final_k: int = 6):
+def retrieve_docs(query: str, final_k: int = 10):
     candidates = mq_retriever.get_relevant_documents(query)
 
     if not candidates and not fast_mode:
         old = compressor.similarity_threshold
-        compressor.similarity_threshold = 0.58
+        compressor.similarity_threshold = 0.5
         candidates = mq_retriever.get_relevant_documents(query)
         compressor.similarity_threshold = old
 
@@ -215,8 +205,18 @@ def retrieve_docs(query: str, final_k: int = 6):
     if not candidates:
         return []
 
+    use_reranker = (reranker is not None)
+
+    if not use_reranker:
+        ranked_docs = candidates[: (5 if fast_mode else final_k)]
+    else:
+        pairs = [(query, truncate_for_rerank(d.page_content)) for d in candidates]
+        scores = reranker.predict(pairs, batch_size=32, show_progress_bar=False)
+
+        ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+            
     if reranker is None:
-        ranked_docs = candidates[: (4 if fast_mode else final_k)]
+        ranked_docs = candidates[: (5 if fast_mode else final_k)]
     else:
         pairs = [(query, truncate_for_rerank(d.page_content)) for d in candidates]
         scores = reranker.predict(pairs)
@@ -234,13 +234,9 @@ def retrieve_docs(query: str, final_k: int = 6):
     return ranked_docs
 
 # --- System prompt ---
-SYSTEM_PROMPT_TMPL = """Bạn là trợ lý pháp lý, chỉ trả lời dựa trên dữ liệu được cung cấp.
-
-YÊU CẦU:
-- Trả lời đầy đủ ý chính.
-- Ghi rõ Nguồn (trong ngữ liệu) và trích dẫn Điều/Khoản/Điểm/Tên luật (nếu xuất hiện trong ngữ liệu).
-- KHÔNG bịa, KHÔNG suy đoán ngoài dữ liệu.
-- Nếu không đủ thông tin: "Tôi không có đủ thông tin để chắc chắn."
+SYSTEM_PROMPT_TMPL = """Bạn là trợ lý pháp lý. Chỉ sử dụng thông tin trong CONTEXT để trả lời ngắn gọn, nêu rõ Điều/Khoản/Tên luật nếu xuất hiện. 
+Nếu không tìm thấy trong CONTEXT thì nói “Tôi không có đủ thông tin để chắc chắn” và đề xuất câu hỏi làm rõ. 
+"
 
 Context:
 {context}
@@ -306,10 +302,8 @@ if prompt:
         st.markdown(prompt)
     st.session_state.messages.append(HumanMessage(prompt))
 
-    # Lấy tài liệu tốt nhất theo pipeline 3 tầng + (rerank nếu có)
-    docs = retrieve_docs(prompt, final_k=6)
+    docs = retrieve_docs(prompt, final_k=4)
 
-    # Nếu vẫn trống, trả lời an toàn
     if not docs:
         safe_reply = "Tôi không có đủ thông tin để chắc chắn."
         with st.chat_message("assistant"):
@@ -319,49 +313,39 @@ if prompt:
         docs_text = build_context(docs)
         system_prompt = SYSTEM_PROMPT_TMPL.format(context=docs_text)
 
-        # Gọi Gemma để trả lời
-        final_prompt = system_prompt + "\n\nQuestion: " + prompt + "\nAnswer:"
-        inputs = tokenizer(final_prompt, return_tensors="pt", truncation=True)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-        max_tokens = 300 if fast_mode else 600
-        do_sample = False if fast_mode else True
-
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-        generation_kwargs = dict(
-            **inputs,
-            max_new_tokens=max_tokens,
-            do_sample=do_sample,
-            temperature=0.7 if not fast_mode else 0.0,
-            streamer=streamer,
-        )
-
-        thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
-        thread.start()
-
-        partial_text = ""
+        # Gọi model qua LM Studio (OpenAI-compatible), stream từng chunk
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
 
         with st.chat_message("assistant"):
             placeholder = st.empty()
-            for token_text in streamer:
-                partial_text += token_text
-                placeholder.markdown(partial_text)
+            partial_text = ""
 
-        thread.join()
+            # khi gọi LM Studio:
+            stream = client.chat.completions.create(
+                model=lm_model_id,
+                messages=messages,
+                temperature=0.0 if fast_mode else 0.7,
+                max_tokens=200 if fast_mode else 300,  # ↓
+                stream=True,
+)
+
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    partial_text += delta
+                    placeholder.markdown(partial_text)
+
         result = partial_text.strip()
         st.session_state.messages.append(AIMessage(result))
 
-        # Hiển thị nguồn
         with st.expander("Nguồn tham khảo đã dùng"):
             for i, d in enumerate(docs, 1):
-                name = (
-                    d.metadata.get("name")
-                    or d.metadata.get("file_name")
-                    or d.metadata.get("source_id")
-                    or "Không rõ nguồn"
-                )
+                name = (d.metadata.get("name")
+                        or d.metadata.get("file_name")
+                        or d.metadata.get("source_id")
+                        or "Không rõ nguồn")
                 st.markdown(f"**{i}. {name}**")
 
-# Nhắc nếu ASR chưa sẵn sàng
-if not asr_pipe:
-    st.caption("⚠️ ASR chưa sẵn sàng (PhoWhisper/Whisper). Kiểm tra HUGGINGFACE_HUB_TOKEN và kết nối mạng.")
