@@ -15,7 +15,17 @@ load_dotenv()
 # Initialize Pinecone
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 index_name = os.environ.get("PINECONE_INDEX_NAME")
-index = pc.Index(index_name)
+index_host = os.environ.get("PINECONE_INDEX_HOST")
+
+try:
+    if index_host:
+        index = pc.Index(index_name, host=index_host)
+    else:
+        desc = pc.describe_index(index_name)
+        host = desc.get("host") if isinstance(desc, dict) else getattr(desc, "host", None)
+        index = pc.Index(index_name, host=host) if host else pc.Index(index_name)
+except Exception:
+    index = pc.Index(index_name)
 
 # Dùng HuggingFaceEmbeddings miễn phí (same model with ingestion)
 embeddings = HuggingFaceEmbeddings(
