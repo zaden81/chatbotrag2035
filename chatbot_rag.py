@@ -71,7 +71,23 @@ st.markdown(
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 index_name = os.environ.get("PINECONE_INDEX_NAME")
 index_host = os.environ.get("PINECONE_INDEX_HOST")
-index = pc.Index(index_name, host=index_host) 
+
+# Fallback if host is not provided
+try:
+    if index_host:
+        index = pc.Index(index_name, host=index_host)
+    else:
+        # Try to fetch host from describe; if unavailable, instantiate without host
+        desc = pc.describe_index(index_name)
+        host = None
+        if isinstance(desc, dict):
+            host = desc.get("host")
+        else:
+            host = getattr(desc, "host", None)
+        index = pc.Index(index_name, host=host) if host else pc.Index(index_name)
+except Exception:
+    # Last resort
+    index = pc.Index(index_name)
 
 # Embeddings 
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")

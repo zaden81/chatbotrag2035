@@ -42,10 +42,20 @@ if index_name not in existing_indexes:
     while not pc.describe_index(index_name).status["ready"]:
         time.sleep(1)
 
-index = pc.Index(index_name)
+# Initialize index with host fallback if needed
+index_host = os.environ.get("PINECONE_INDEX_HOST")
+try:
+    if index_host:
+        index = pc.Index(index_name, host=index_host)
+    else:
+        desc = pc.describe_index(index_name)
+        host = desc.get("host") if isinstance(desc, dict) else getattr(desc, "host", None)
+        index = pc.Index(index_name, host=host) if host else pc.Index(index_name)
+except Exception:
+    index = pc.Index(index_name)
 
 embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-mpnet-base-v2"
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 # initialize embeddings model + vector store
@@ -53,20 +63,12 @@ embeddings = HuggingFaceEmbeddings(
 vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
 
-# loading the PDF document
-import json
+# loading the documents from local folder
+from langchain_community.document_loaders import PyPDFDirectoryLoader
 
-json_path = r"D:\khoaluan\data\data_luat_hon_nhan_gia_dinh.json"
-with open(json_path, "r", encoding="utf-8") as f:
-    data = json.load(f)
-
-# Tạo Document list
-raw_documents = []
-for item in data:
-    if not item.get("noi_dung"):
-        continue
-    metadata = {k: v for k, v in item.items() if k != "noi_dung"}
-    raw_documents.append(Document(page_content=item["noi_dung"], metadata=metadata))
+docs_dir = os.environ.get("DOCS_DIR", "/workspace/documents")
+loader = PyPDFDirectoryLoader(docs_dir)
+raw_documents = loader.load()
 
 
 
